@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "numcompute"
+version = "0.1.0"
+description = "A modular scientific computing toolkit using NumPy"
+authors = [
+    { name = "Sheikh Muhammad Aarib Azfar", email = "aaribazfar@gmail.com" },
+    { name = "Rashik Iram Chowdhury", email = "rashikiramchowdhury1@gmail.com" },
+    { name = "Farhat Tarannum", email = "tarannumfarhat11@gmail.com" },
+    { name = "Sanzana Shreya", email = "sanzanamahrukhhassanshreya@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+    "numpy"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
