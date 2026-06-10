@@ -1,7 +1,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![NumPy](https://img.shields.io/badge/NumPy-Used-orange)
 ![Matplotlib](https://img.shields.io/badge/Matplotlib-Used-green)
-![pytest](https://img.shields.io/badge/pytest-293%2B_tests-brightgreen)
+![pytest](https://img.shields.io/badge/pytest-312%2B_tests-brightgreen)
 
 # NumCompute-Stream
 
