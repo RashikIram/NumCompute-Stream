@@ -1,28 +1,27 @@
-````markdown
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![NumPy](https://img.shields.io/badge/NumPy-Used-orange)
 ![Matplotlib](https://img.shields.io/badge/Matplotlib-Used-green)
-![pytest](https://img.shields.io/badge/pytest-293%2B%20tests-brightgreen)
+![pytest](https://img.shields.io/badge/pytest-293%2B_tests-brightgreen)
 
 # NumCompute-Stream
 
-A modular scientific computing and machine learning toolkit built using **pure Python, NumPy, and Matplotlib**.
+NumCompute-Stream is a lightweight scientific computing and streaming machine learning toolkit built from scratch using **pure Python, NumPy, and Matplotlib**.
 
-This project extends the original **NumCompute** framework. The previous toolkit already included core scientific computing and machine learning utilities such as custom CSV I/O, preprocessing, statistics, sorting/searching, ranking, optimisation, metrics, and pipeline abstraction. This extended version adds **streaming classification**, **decision trees**, **tree-based ensembles**, **incremental preprocessing**, **streaming metrics**, **benchmarking**, and **visualisation**.
+This project extends the original **NumCompute** framework. The previous toolkit already included core scientific computing utilities such as custom CSV I/O, preprocessing, statistics, sorting/searching, ranking, optimisation helpers, metrics, and pipeline abstraction. This extended version adds **streaming classification**, a custom **decision tree classifier**, **tree-based ensembles**, **incremental preprocessing**, **streaming statistics**, **streaming and rolling metrics**, **prequential evaluation**, **benchmarking**, and **visualisation**.
 
-The project is built from scratch without external machine learning libraries, with a strong focus on **vectorisation, numerical stability, modular software design, testing, and reproducible benchmarking**.
+The package is designed without external machine learning libraries and focuses on **vectorisation, numerical stability, modular software design, automated testing, and reproducible benchmarking**.
 
 ---
 
-## 🚀 Features
+## Features
 
-### 📥 Data I/O
-- Custom CSV reader using `io.py`
+### Data I/O
+- Custom CSV loading utilities
 - Missing-value handling
 - Mixed-type CSV support
 - Dataset loading for demos and benchmarking
 
-### 🧼 Preprocessing
+### Preprocessing
 - `StandardScaler`
 - `MinMaxScaler`
 - `Imputer`
@@ -31,37 +30,36 @@ The project is built from scratch without external machine learning libraries, w
 - Batch and streaming-style `partial_fit()` support
 - Handling for NaNs, constant columns, all-NaN columns, column mismatches, and categorical expansion
 
-### 🔍 Sorting and Searching
+### Sorting, Searching, and Ranking
 - Stable sorting
 - Multi-key sorting
-- Top-k selection using `argpartition`
-- Quickselect for k-th smallest values
+- Top-k selection
+- Quickselect
 - Binary search
-
-### 🏆 Ranking
 - Ranking with tie handling
 - Average, dense, and ordinal ranking modes
 - Percentile computation
-- Duplicate and NaN-aware behaviour
 
-### 📊 Statistics
+### Statistics
 - Mean, median, variance, and standard deviation
 - Minimum and maximum
 - Histograms
 - Quantiles and percentiles
 - Axis-wise computations
 - NaN-safe statistical operations
-- Streaming statistics utilities
+- Streaming statistics with online mean and variance updates
+- Optional stored-value support for exact quantiles and histograms
 
-### 🌳 Tree-Based Classification
+### Tree-Based Classification
 - `DecisionTreeClassifier`
 - Gini and entropy splitting
 - Probability prediction with `predict_proba()`
 - Sample-weight support
+- Feature importance
 - Reset support
 - Streaming-style updates using `partial_fit()`
 
-### 🌲 Ensemble Learning
+### Ensemble Learning
 - `OnlineBaggingClassifier`
 - `RandomForestClassifier`
 - `RandomSubspaceClassifier`
@@ -71,7 +69,7 @@ The project is built from scratch without external machine learning libraries, w
 - Multiclass classification support
 - Incremental training with `partial_fit()`
 
-### 📏 Metrics
+### Metrics
 - Accuracy
 - Precision, recall, specificity
 - F1-score and F-beta
@@ -82,22 +80,21 @@ The project is built from scratch without external machine learning libraries, w
 - Cohen’s kappa
 - Top-k accuracy
 - Log loss and Brier score
-- ROC/AUC
+- Binary and multiclass ROC-AUC
 - MSE, RMSE, MAD, and MAPE
-- Rolling and streaming metrics
+- Streaming and rolling-window metrics
 
-### ⚡ Optimisation
+### Optimisation
 - Finite-difference gradients
 - Jacobian estimation
 - Numerical derivative utilities
 
-### 🧮 Mathematical Utilities
+### Mathematical Utilities
 - Batch iteration helpers
-- Distance metrics
 - Euclidean, Manhattan, Cosine, and pairwise distances
 - Stable sigmoid, softmax, and logsumexp helpers
 
-### 🔗 Pipeline API
+### Pipeline API
 - Transformer-based design
 - Sequential pipelines
 - Transformer-only workflows
@@ -105,7 +102,14 @@ The project is built from scratch without external machine learning libraries, w
 - Streaming pipelines using `partial_fit()`
 - Unified `fit()`, `transform()`, `fit_transform()`, `predict()`, `predict_proba()`, and `score()` API
 
-### 📈 Visualisation
+### Stream Training
+- `StreamTrainer` for chunk-wise learning
+- Prequential test-then-train evaluation
+- First-chunk scoring skip when the model is not yet fitted
+- Chunk accuracy and cumulative accuracy logging
+- Timing and memory tracking
+
+### Visualisation
 - Metric-over-time plots
 - Model comparison plots
 - Class-distribution plots
@@ -114,218 +118,137 @@ The project is built from scratch without external machine learning libraries, w
 - Confusion matrix heatmaps
 - Predictions vs ground truth
 - Feature histograms
-- ROC curve plots
+- Binary ROC curves
+- One-vs-rest multiclass ROC curves
 
-### ⏱ Benchmarking
+### Benchmarking
 - Streaming benchmark using prequential test-then-train evaluation
 - Stratified train-test split before chunking
 - Iris and Sleep dataset support
-- Separate predictive performance and computational efficiency tables
+- Predictive and efficiency metrics
 - Runtime, memory, latency, and throughput tracking
+- Vectorisation microbenchmarks against loop-based baselines
 
-### 🧪 Testing
+### Testing
 - 293+ pytest cases
-- Tests for previous NumCompute modules and the new streaming extension
-- Coverage for normal workflows, invalid inputs, edge cases, streaming updates, metrics, preprocessing, visualisation, and benchmarking
+- Tests for original NumCompute utilities and the new streaming extension
+- Coverage for normal workflows, invalid inputs, edge cases, streaming updates, metrics, preprocessing, stream trainer behaviour, visualisation, and benchmarking
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```bash
 NumCompute-Stream/
-├── numcompute/                  # Core library
-│   ├── benchmarking.py           # Streaming benchmark utilities
-│   ├── ensemble.py               # Tree-based ensemble classifiers
-│   ├── io.py                     # Custom CSV I/O
-│   ├── metrics.py                # Batch and streaming metrics
-│   ├── models.py                 # Baseline models
-│   ├── pipeline.py               # Pipeline abstraction
-│   ├── preprocessing.py          # Scalers, imputer, encoder, column transformer
-│   ├── ranking.py                # Ranking and percentile utilities
-│   ├── search.py                 # Searching algorithms
-│   ├── sort.py                   # Sorting algorithms
-│   ├── stats.py                  # Statistical utilities
-│   ├── stream.py                 # Stream trainer and logging
-│   ├── tree.py                   # Decision tree classifier
-│   ├── utils.py                  # Mathematical and utility helpers
-│   └── visualise.py              # Matplotlib visualisation helpers
-├── benchmarking/                 # Benchmark scripts and output CSV files
-├── data/                         # CSV datasets
-├── demo/                         # Demo notebook
-├── tests/                        # Unit tests
+├── numcompute_stream/
+│   ├── __init__.py
+│   ├── benchmarking.py
+│   ├── ensemble.py
+│   ├── io.py
+│   ├── metrics.py
+│   ├── models.py
+│   ├── optim.py
+│   ├── pipeline.py
+│   ├── preprocessing.py
+│   ├── rank.py
+│   ├── sort_search.py
+│   ├── stats.py
+│   ├── stream.py
+│   ├── tree.py
+│   ├── utils.py
+│   └── visualise.py
+├── benchmark/
+│   ├── benchmark_results.csv
+│   └── vectorization_results.csv
+├── data/
+├── demo/
+│   └── stream_demo.ipynb
+├── tests/
+│   ├── test_ensemble.py
+│   ├── test_metrics.py
+│   ├── test_pipeline.py
+│   ├── test_preprocessing.py
+│   ├── test_stats.py
+│   ├── test_stream.py
+│   ├── test_tree.py
+│   └── test_visualise.py
 ├── README.md
 └── pyproject.toml
-````
-
----
-
-## ⚙️ Installation
-
-Clone the repository:
-
-```bash
-git clone <your-repo-link>
-cd NumCompute-Stream
-```
-
-Install the package in editable mode:
-
-```bash
-pip install -e .
-```
-
-Install testing dependencies:
-
-```bash
-pip install pytest
 ```
 
 ---
 
-## ▶️ Running the Demo
+## Example Usage
 
-Open the streaming demo notebook:
+```python
+import numpy as np
+
+from numcompute_stream.tree import DecisionTreeClassifier
+from numcompute_stream.stream import StreamTrainer
+
+X1 = np.array([[0.0], [1.0], [2.0]])
+y1 = np.array([0, 0, 1])
+
+X2 = np.array([[3.0], [4.0], [5.0]])
+y2 = np.array([1, 1, 1])
+
+model = DecisionTreeClassifier(max_depth=3)
+trainer = StreamTrainer(model, classes=[0, 1])
+
+trainer.fit_score_chunk(X1, y1, score_before_fit=True)
+trainer.fit_score_chunk(X2, y2, score_before_fit=True)
+
+print(trainer.get_metric_history("chunk_accuracy"))
+```
+
+---
+
+## Running Tests
+
+```bash
+pytest
+```
+
+---
+
+## Running the Demo
+
+Open the demo notebook:
 
 ```bash
 jupyter notebook demo/stream_demo.ipynb
 ```
 
-The demo shows:
-
-* Loading a CSV dataset using the custom I/O module
-* Dataset inspection and visualisation
-* Train-test splitting before stream chunking
-* Chunk-wise incremental training using `.partial_fit()`
-* Pipeline usage and logging
-* Streaming metric visualisation
-* Model comparison
-* Predictions and confusion matrix visualisation
+The notebook demonstrates chunk-wise preprocessing, stream training, decision tree and ensemble comparison, streaming metrics, ROC visualisation, and benchmark outputs.
 
 ---
 
-## ⏱ Running Benchmarks
+## Benchmarking
 
-Run the benchmark script:
+The benchmark compares the custom decision tree against Online Bagging, Random Forest, Random Subspace, Extra Trees, and AdaBoost SAMME using a stratified holdout split and prequential test-then-train chunks.
 
-```bash
-python benchmarking/benchmarking.py
-```
+The benchmarking module records:
 
-Or run it from Python:
+- prequential accuracy
+- held-out test accuracy
+- macro-F1 score
+- fit time
+- prediction time
+- total runtime
+- memory usage
+- latency
+- throughput
 
-```python
-from numcompute.benchmarking import run_streaming_benchmarks
-
-results = run_streaming_benchmarks(save_csv=True)
-```
-
-The benchmark creates:
-
-```bash
-benchmarking/benchmark_results.csv
-benchmarking/benchmark_performance_results.csv
-benchmarking/benchmark_efficiency_results.csv
-```
-
-The benchmark reports two views:
-
-### Predictive Performance
-
-* Accuracy
-* Macro precision
-* Macro recall
-* Macro F1
-* Weighted F1
-* Balanced accuracy
-* Matthews correlation coefficient
-* Cohen’s kappa
-
-### Computational Efficiency
-
-* Fit time
-* Prediction time
-* Total time
-* Peak memory
-* Latency per sample
-* Training throughput
-* Test throughput
+Vectorisation microbenchmarks are also included to compare selected NumPy implementations against loop-based baselines.
 
 ---
 
-## 🧪 Running Tests
+## Notes
 
-Run all tests:
-
-```bash
-pytest tests/
-```
-
-Run selected test files:
-
-```bash
-pytest tests/test_pipeline.py
-pytest tests/test_preprocessing.py
-pytest tests/test_benchmarking.py
-pytest tests/test_metrics.py
-```
+The decision tree uses an accumulate-and-rebuild strategy for `partial_fit()`. This provides a clear and testable streaming simulation, but it is not a fully online Hoeffding tree. Exact quantiles and some histogram functionality require stored values, while running mean and variance can be updated online without storing all previous chunks.
 
 ---
 
-## 🧠 Design Principles
+## License
 
-* **Extension-first design**
-  The project preserves the original NumCompute toolkit and adds a streaming machine learning layer on top.
-
-* **NumPy-first implementation**
-  Core functionality is implemented using NumPy without external machine learning libraries.
-
-* **Vectorisation where appropriate**
-  Array operations are used for preprocessing, statistics, metrics, and probability aggregation.
-
-* **Streaming compatibility**
-  Models, preprocessing components, metrics, and trainers support chunk-wise workflows using `partial_fit()`.
-
-* **Consistent API**
-  Components follow familiar method names such as `fit()`, `transform()`, `partial_fit()`, `predict()`, and `predict_proba()`.
-
-* **Modular architecture**
-  Each module has a focused responsibility, making the project easier to test, maintain, and extend.
-
-* **Numerical stability**
-  The implementation handles NaNs, zero divisions, constant columns, probability clipping, and invalid numerical inputs.
-
-* **Benchmark transparency**
-  Predictive performance and computational efficiency are reported separately to show accuracy-runtime trade-offs.
-
-* **Test-driven robustness**
-  The framework is validated with 293+ pytest cases covering both the original toolkit and the new streaming extension.
-
----
-
-## 📌 Example Streaming Workflow
-
-```python
-from numcompute.pipeline import Pipeline
-from numcompute.preprocessing import StandardScaler
-from numcompute.tree import DecisionTreeClassifier
-
-pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("tree", DecisionTreeClassifier(max_depth=4, random_state=42))
-])
-
-for X_chunk, y_chunk in stream_chunks:
-    pipe.partial_fit(X_chunk, y_chunk, classes=classes)
-
-predictions = pipe.predict(X_test)
-```
-
----
-
-## 👥 Author
-
-**Rashik Iram Chowdhury**
-
-```
-```
+This project was developed for educational purposes as part of a programming for artificial intelligence assignment.
