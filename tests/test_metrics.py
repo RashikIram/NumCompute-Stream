@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.metrics import (
+from numcompute_stream.metrics import (
     accuracy,
     confusion_matrix,
     precision,
@@ -27,6 +27,7 @@ from numcompute.metrics import (
     mape,
     roc_curve,
     auc,
+    multiclass_roc_auc,
     StreamingConfusionMatrix,
     StreamingAccuracy,
     StreamingPrecision,
@@ -39,6 +40,12 @@ from numcompute.metrics import (
     StreamingCohenKappa,
     RollingAccuracy,
     RollingF1,
+    StreamingMacroPrecision,
+    StreamingMacroRecall,
+    StreamingWeightedPrecision,
+    StreamingWeightedRecall,
+    StreamingROCAUC,
+    RollingROCAUC,
 )
 
 
@@ -501,3 +508,160 @@ def test_all_wrong_prediction_metrics_are_valid():
     assert np.isclose(matthews_corrcoef(y_true, y_pred), -1.0)
     assert 0 <= macro_f1(y_true, y_pred) <= 1
     assert 0 <= weighted_f1(y_true, y_pred) <= 1
+
+# ---------------- NEW STREAMING MULTICLASS PRECISION / RECALL TESTS ---------------- #
+
+def _expected_weighted_precision_recall(y_true, y_pred):
+    cm = confusion_matrix(y_true, y_pred).astype(float)
+
+    tp = np.diag(cm)
+    predicted = np.sum(cm, axis=0)
+    actual = np.sum(cm, axis=1)
+
+    precision_scores = np.divide(
+        tp,
+        predicted,
+        out=np.zeros_like(tp, dtype=float),
+        where=predicted != 0
+    )
+
+    recall_scores = np.divide(
+        tp,
+        actual,
+        out=np.zeros_like(tp, dtype=float),
+        where=actual != 0
+    )
+
+    support = actual
+
+    weighted_precision = np.sum(precision_scores * support) / np.sum(support)
+    weighted_recall = np.sum(recall_scores * support) / np.sum(support)
+
+    return weighted_precision, weighted_recall
+
+
+def test_streaming_macro_precision_recall_match_batch_over_chunks():
+    y_true_1 = np.array([0, 1, 2, 2])
+    y_pred_1 = np.array([0, 2, 2, 1])
+
+    y_true_2 = np.array([0, 1, 1, 2])
+    y_pred_2 = np.array([0, 1, 2, 2])
+
+    metric_precision = StreamingMacroPrecision()
+    metric_recall = StreamingMacroRecall()
+
+    metric_precision.update(y_true_1, y_pred_1)
+    metric_precision.update(y_true_2, y_pred_2)
+
+    metric_recall.update(y_true_1, y_pred_1)
+    metric_recall.update(y_true_2, y_pred_2)
+
+    y_true_all = np.concatenate([y_true_1, y_true_2])
+    y_pred_all = np.concatenate([y_pred_1, y_pred_2])
+
+    assert np.isclose(metric_precision.result(), macro_precision(y_true_all, y_pred_all))
+    assert np.isclose(metric_recall.result(), macro_recall(y_true_all, y_pred_all))
+
+
+def test_streaming_weighted_precision_recall_match_expected_over_chunks():
+    y_true_1 = np.array([0, 1, 2, 2])
+    y_pred_1 = np.array([0, 2, 2, 1])
+
+    y_true_2 = np.array([0, 1, 1, 2])
+    y_pred_2 = np.array([0, 1, 2, 2])
+
+    metric_precision = StreamingWeightedPrecision()
+    metric_recall = StreamingWeightedRecall()
+
+    metric_precision.update(y_true_1, y_pred_1)
+    metric_precision.update(y_true_2, y_pred_2)
+
+    metric_recall.update(y_true_1, y_pred_1)
+    metric_recall.update(y_true_2, y_pred_2)
+
+    y_true_all = np.concatenate([y_true_1, y_true_2])
+    y_pred_all = np.concatenate([y_pred_1, y_pred_2])
+
+    expected_precision, expected_recall = _expected_weighted_precision_recall(
+        y_true_all,
+        y_pred_all
+    )
+
+    assert np.isclose(metric_precision.result(), expected_precision)
+    assert np.isclose(metric_recall.result(), expected_recall)
+
+
+def test_multiclass_roc_auc_perfect_scores_is_one():
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+
+    y_scores = np.array([
+        [0.90, 0.05, 0.05],
+        [0.05, 0.90, 0.05],
+        [0.05, 0.05, 0.90],
+        [0.85, 0.10, 0.05],
+        [0.10, 0.80, 0.10],
+        [0.05, 0.10, 0.85],
+    ])
+
+    score = multiclass_roc_auc(y_true, y_scores, average="macro")
+
+    assert np.isclose(score, 1.0)
+
+
+def test_streaming_roc_auc_binary_matches_batch_auc():
+    y_true_1 = np.array([0, 1, 1])
+    y_score_1 = np.array([0.1, 0.8, 0.7])
+
+    y_true_2 = np.array([0, 1, 0])
+    y_score_2 = np.array([0.2, 0.9, 0.3])
+
+    metric = StreamingROCAUC(positive_label=1)
+    metric.update(y_true_1, y_score_1)
+    metric.update(y_true_2, y_score_2)
+
+    y_true_all = np.concatenate([y_true_1, y_true_2])
+    y_score_all = np.concatenate([y_score_1, y_score_2])
+
+    fpr, tpr = roc_curve(y_true_all, y_score_all)
+    expected = auc(fpr, tpr)
+
+    assert np.isclose(metric.result(), expected)
+
+
+def test_streaming_roc_auc_multiclass_matches_batch_multiclass_auc():
+    y_true_1 = np.array([0, 1, 2])
+    y_scores_1 = np.array([
+        [0.90, 0.05, 0.05],
+        [0.10, 0.80, 0.10],
+        [0.05, 0.10, 0.85],
+    ])
+
+    y_true_2 = np.array([0, 1, 2])
+    y_scores_2 = np.array([
+        [0.85, 0.10, 0.05],
+        [0.05, 0.90, 0.05],
+        [0.05, 0.15, 0.80],
+    ])
+
+    metric = StreamingROCAUC(average="macro")
+    metric.update(y_true_1, y_scores_1)
+    metric.update(y_true_2, y_scores_2)
+
+    y_true_all = np.concatenate([y_true_1, y_true_2])
+    y_scores_all = np.vstack([y_scores_1, y_scores_2])
+
+    expected = multiclass_roc_auc(y_true_all, y_scores_all, average="macro")
+
+    assert np.isclose(metric.result(), expected)
+
+
+def test_rolling_roc_auc_keeps_window_size():
+    y_true = np.array([0, 1, 0, 1, 0, 1])
+    y_scores = np.array([0.1, 0.8, 0.2, 0.7, 0.3, 0.9])
+
+    metric = RollingROCAUC(window_size=4)
+    metric.update(y_true, y_scores)
+
+    assert len(metric.y_true_buffer) == 4
+    assert len(metric.y_score_buffer) == 4
+    assert 0 <= metric.result() <= 1

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.utils import (
+from numcompute_stream.utils import (
     train_test_split,
     euclidean_distance,
     manhattan_distance,

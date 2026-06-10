@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.stream import StreamTrainer
+from numcompute_stream.stream import StreamTrainer
 
 
 class DummyStreamingModel:
@@ -225,3 +225,61 @@ def test_track_memory_false_sets_memory_to_zero():
 
     assert trainer.logs[0]["current_memory_mb"] == 0
     assert trainer.logs[0]["peak_memory_mb"] == 0
+
+# ---------------- PREQUENTIAL FIRST-CHUNK TESTS ---------------- #
+
+def test_fit_score_chunk_prequential_first_chunk_skips_score_and_trains():
+    model = DummyStreamingModel()
+    trainer = StreamTrainer(model, classes=[0, 1])
+
+    result = trainer.fit_score_chunk(
+        np.array([[0], [1]]),
+        np.array([1, 1]),
+        score_before_fit=True
+    )
+
+    assert result["event"] == "score_skipped"
+    assert result["skipped"] is True
+    assert model.fitted is True
+    assert trainer.n_samples_seen == 2
+    assert trainer.total_scored == 0
+    assert trainer.total_correct == 0
+
+    assert len(trainer.logs) == 2
+    assert trainer.logs[0]["event"] == "score_skipped"
+    assert trainer.logs[1]["event"] == "fit"
+
+
+def test_fit_score_chunk_prequential_second_chunk_scores_before_training():
+    model = DummyStreamingModel()
+    trainer = StreamTrainer(model, classes=[0, 1])
+
+    trainer.fit_score_chunk(
+        np.array([[0], [1]]),
+        np.array([1, 1]),
+        score_before_fit=True
+    )
+
+    result = trainer.fit_score_chunk(
+        np.array([[2], [3]]),
+        np.array([0, 0]),
+        score_before_fit=True
+    )
+
+    assert result["event"] == "score"
+    assert result["chunk"] == 2
+
+    # The model was trained only on the first chunk before scoring this chunk,
+    # so it predicts class 1 and gets both class-0 samples wrong.
+    assert np.isclose(result["chunk_accuracy"], 0.0)
+
+    # After scoring, the second chunk is used for training.
+    assert model.majority_class == 0
+    assert trainer.n_samples_seen == 4
+
+    assert [log["event"] for log in trainer.logs] == [
+        "score_skipped",
+        "fit",
+        "score",
+        "fit",
+    ]

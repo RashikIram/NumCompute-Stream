@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.tree import DecisionTreeClassifier
+from numcompute_stream.tree import DecisionTreeClassifier
 
 
 # ---------------- BASIC FIT / PREDICT TESTS ---------------- #

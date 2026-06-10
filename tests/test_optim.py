@@ -1,5 +1,5 @@
 import numpy as np
-from numcompute.optim import grad, jacobian
+from numcompute_stream.optim import grad, jacobian
 
 
 def test_grad_central_quadratic_function():

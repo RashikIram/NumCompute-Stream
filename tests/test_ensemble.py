@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.ensemble import (
+from numcompute_stream.ensemble import (
     EnsembleClassifier,
     OnlineBaggingClassifier,
     RandomForestClassifier,

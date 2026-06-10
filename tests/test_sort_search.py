@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.sort_search import (
+from numcompute_stream.sort_search import (
     sort,
     multisort,
     topk,

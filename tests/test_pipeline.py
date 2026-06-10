@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from numcompute.pipeline import Pipeline
+from numcompute_stream.pipeline import Pipeline
 
 
 class DummyTransformer:

@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from numcompute.visualise import (
+from numcompute_stream.visualise import (
     plot_metric_over_time,
     compare_models,
     plot_model_comparison,
@@ -18,6 +18,7 @@ from numcompute.visualise import (
     plot_missing_values,
     plot_feature_histogram,
     plot_roc_curve,
+    plot_multiclass_roc_curves,
 )
 
 
@@ -240,6 +241,92 @@ def test_plot_roc_curve_shape_mismatch_raises():
 def test_plot_roc_curve_out_of_range_raises():
     with pytest.raises(ValueError):
         plot_roc_curve([0.0, 1.5], [0.0, 1.0], show=False)
+
+# ---------------- MULTICLASS ROC VISUALISATION TESTS ---------------- #
+
+def test_plot_multiclass_roc_curves_returns_figure():
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+
+    y_scores = np.array([
+        [0.90, 0.05, 0.05],
+        [0.05, 0.90, 0.05],
+        [0.05, 0.05, 0.90],
+        [0.85, 0.10, 0.05],
+        [0.10, 0.80, 0.10],
+        [0.05, 0.10, 0.85],
+    ])
+
+    fig = plot_multiclass_roc_curves(
+        y_true,
+        y_scores,
+        classes=[0, 1, 2],
+        show=False
+    )
+
+    assert isinstance(fig, Figure)
+
+
+def test_plot_multiclass_roc_curves_class_mismatch_raises():
+    y_true = np.array([0, 1, 2])
+
+    y_scores = np.array([
+        [0.80, 0.10, 0.10],
+        [0.10, 0.80, 0.10],
+        [0.10, 0.10, 0.80],
+    ])
+
+    with pytest.raises(ValueError):
+        plot_multiclass_roc_curves(
+            y_true,
+            y_scores,
+            classes=[0, 1],
+            show=False
+        )
+
+
+def test_plot_multiclass_roc_curves_no_valid_curve_raises():
+    y_true = np.array([0, 0, 0])
+
+    y_scores = np.array([
+        [0.90, 0.10],
+        [0.85, 0.15],
+        [0.80, 0.20],
+    ])
+
+    with pytest.raises(ValueError):
+        plot_multiclass_roc_curves(
+            y_true,
+            y_scores,
+            classes=[0, 1],
+            show=False
+        )
+
+
+def test_plot_multiclass_roc_curves_save_file(tmp_path):
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+
+    y_scores = np.array([
+        [0.90, 0.05, 0.05],
+        [0.05, 0.90, 0.05],
+        [0.05, 0.05, 0.90],
+        [0.85, 0.10, 0.05],
+        [0.10, 0.80, 0.10],
+        [0.05, 0.10, 0.85],
+    ])
+
+    output_path = tmp_path / "multiclass_roc.png"
+
+    fig = plot_multiclass_roc_curves(
+        y_true,
+        y_scores,
+        classes=[0, 1, 2],
+        save_path=str(output_path),
+        show=False
+    )
+
+    assert isinstance(fig, Figure)
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
 
 
 # ---------------- SAVE TEST ---------------- #

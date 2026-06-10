@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pytest
 
-from numcompute.io import read_csv
+from numcompute_stream.io import read_csv
 
 
 def test_read_csv_valid_file():

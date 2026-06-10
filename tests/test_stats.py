@@ -2,7 +2,7 @@ import warnings
 import numpy as np
 import pytest
 
-from numcompute.stats import (
+from numcompute_stream.stats import (
     mean,
     median,
     std,
@@ -372,3 +372,65 @@ def test_streaming_stats_no_store_values_quantiles_raises():
 
     with pytest.raises(ValueError):
         stats.quantiles(50)
+
+# ---------------- STORE_VALUES=False STREAMING STATS TESTS ---------------- #
+
+def test_streaming_stats_store_values_false_matches_numpy_over_chunks():
+    X1 = np.array([1.0, 2.0, np.nan])
+    X2 = np.array([4.0, 5.0])
+
+    stats = StreamingStats(store_values=False)
+    stats.update_stats(X1)
+    stats.update_stats(X2)
+
+    combined = np.array([1.0, 2.0, 4.0, 5.0])
+    result = stats.result()
+
+    assert result["count"] == len(combined)
+    assert np.isclose(result["mean"], np.mean(combined))
+    assert np.isclose(result["variance"], np.var(combined))
+    assert np.isclose(result["std"], np.std(combined))
+    assert result["min"] == np.min(combined)
+    assert result["max"] == np.max(combined)
+
+
+def test_streaming_stats_store_values_false_2d_columnwise_matches_numpy():
+    X1 = np.array([
+        [1.0, np.nan],
+        [3.0, 4.0],
+    ])
+
+    X2 = np.array([
+        [5.0, 6.0],
+        [np.nan, 8.0],
+    ])
+
+    stats = StreamingStats(store_values=False)
+    stats.update_stats(X1)
+    stats.update_stats(X2)
+
+    combined = np.vstack([X1, X2])
+    result = stats.result()
+
+    assert np.allclose(result["mean"], np.nanmean(combined, axis=0))
+    assert np.allclose(result["variance"], np.nanvar(combined, axis=0))
+    assert np.allclose(result["std"], np.nanstd(combined, axis=0))
+    assert np.allclose(result["min"], np.nanmin(combined, axis=0))
+    assert np.allclose(result["max"], np.nanmax(combined, axis=0))
+    assert np.array_equal(result["count"], np.array([3, 3]))
+
+
+def test_streaming_stats_store_values_false_quantile_raises():
+    stats = StreamingStats(store_values=False)
+    stats.update_stats([1, 2, 3])
+
+    with pytest.raises(ValueError):
+        stats.quantile(0.5)
+
+
+def test_streaming_stats_store_values_false_histogram_raises():
+    stats = StreamingStats(store_values=False)
+    stats.update_stats([1, 2, 3])
+
+    with pytest.raises(ValueError):
+        stats.histogram()

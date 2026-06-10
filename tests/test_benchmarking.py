@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from numcompute.benchmarking import (
+from numcompute_stream.benchmarking import (
     make_chunks,
     train_test_split_simple,
     benchmark_streaming_model,
     benchmark_streaming_dataset,
 )
-from numcompute.tree import DecisionTreeClassifier
+from numcompute_stream.tree import DecisionTreeClassifier
 
 
 class DummyStreamingModel:
