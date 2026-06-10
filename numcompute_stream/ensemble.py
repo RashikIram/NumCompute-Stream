@@ -1,6 +1,6 @@
 import numpy as np
 
-from numcompute.tree import DecisionTreeClassifier
+from numcompute_stream.tree import DecisionTreeClassifier
 
 
 # ---------------- VALIDATION HELPERS ---------------- #
@@ -310,15 +310,22 @@ class EnsembleClassifier:
         if self.voting == "soft":
             proba = self.predict_proba(X)
             return self.classes_[np.argmax(proba, axis=1)]
-
+        
         votes = np.vstack([tree.predict(X) for tree in self.estimators_]).T
-        predictions = []
 
-        for row in votes:
-            counts = np.asarray([np.sum(row == cls) for cls in self.classes_])
-            predictions.append(self.classes_[np.argmax(counts)])
+        sort_order = np.argsort(self.classes_)
+        sorted_classes = self.classes_[sort_order]
 
-        return np.asarray(predictions)
+        vote_idx_sorted = np.searchsorted(sorted_classes, votes)
+        counts_sorted = np.zeros((votes.shape[0], len(self.classes_)), dtype=int)
+
+        rows = np.repeat(np.arange(votes.shape[0]), votes.shape[1])
+        cols = vote_idx_sorted.ravel()
+
+        np.add.at(counts_sorted, (rows, cols), 1)
+
+        best_sorted = np.argmax(counts_sorted, axis=1)
+        return sorted_classes[best_sorted]
 
     def score(self, X, y):
         """
@@ -518,14 +525,31 @@ class RandomSubspaceClassifier(EnsembleClassifier):
         for tree, features in zip(self.estimators_, self.feature_indices_):
             votes.append(tree.predict(X[:, features]))
 
-        votes = np.vstack(votes).T
-        predictions = []
+        votes = np.vstack(votes).T  # shape: (n_samples, n_estimators)
 
-        for row in votes:
-            counts = np.asarray([np.sum(row == cls) for cls in self.classes_])
-            predictions.append(self.classes_[np.argmax(counts)])
+        sort_order = np.argsort(self.classes_)
+        sorted_classes = self.classes_[sort_order]
 
-        return np.asarray(predictions)
+        flat_votes = votes.ravel()
+        flat_pos_sorted = np.searchsorted(sorted_classes, flat_votes)
+
+        valid = (
+            (flat_pos_sorted >= 0) &
+            (flat_pos_sorted < len(sorted_classes)) &
+            (sorted_classes[flat_pos_sorted] == flat_votes)
+        )
+
+        if not np.all(valid):
+            raise ValueError("Estimator predicted a class not present in self.classes_")
+
+        flat_pos_original = sort_order[flat_pos_sorted]
+
+        vote_counts = np.zeros((votes.shape[0], len(self.classes_)), dtype=int)
+
+        rows = np.repeat(np.arange(votes.shape[0]), votes.shape[1])
+        np.add.at(vote_counts, (rows, flat_pos_original), 1)
+
+        return self.classes_[np.argmax(vote_counts, axis=1)]
 
 
 class ExtraTreesClassifier(RandomSubspaceClassifier):
@@ -721,10 +745,15 @@ class AdaBoostSAMMEClassifier(EnsembleClassifier):
 
         scores = np.zeros((X.shape[0], len(self.classes_)), dtype=float)
 
+        sort_order = np.argsort(self.classes_)
+        sorted_classes = self.classes_[sort_order]
+
         for tree, alpha in zip(self.estimators_, self.estimator_weights_):
             pred = tree.predict(X)
-            for i, cls in enumerate(self.classes_):
-                scores[:, i] += alpha * (pred == cls)
+            pred_idx_sorted = np.searchsorted(sorted_classes, pred)
+            pred_idx_original = sort_order[pred_idx_sorted]
+
+            scores[np.arange(X.shape[0]), pred_idx_original] += alpha
 
         row_sums = np.sum(scores, axis=1, keepdims=True)
         row_sums = np.where(row_sums == 0, 1, row_sums)

@@ -9,16 +9,16 @@ sys.path.append(str(ROOT))
 
 import numpy as np
 
-from numcompute.io import read_csv
-from numcompute.tree import DecisionTreeClassifier
-from numcompute.ensemble import (
+from numcompute_stream.io import read_csv
+from numcompute_stream.tree import DecisionTreeClassifier
+from numcompute_stream.ensemble import (
     OnlineBaggingClassifier,
     RandomForestClassifier,
     RandomSubspaceClassifier,
     ExtraTreesClassifier,
     AdaBoostSAMMEClassifier,
 )
-from numcompute.metrics import (
+from numcompute_stream.metrics import (
     accuracy,
     macro_f1,
     macro_precision,
@@ -29,7 +29,9 @@ from numcompute.metrics import (
 )
 
 DATA_DIR = ROOT / "data"
-OUT_PATH = ROOT / "benchmarking" / "benchmark_results.csv"
+OUT_PATH = ROOT / "benchmark" / "benchmark_results.csv"
+
+VECTORIZATION_OUT_PATH = ROOT / "benchmark" / "vectorization_results.csv"
 
 DATASETS = {
     "Iris": DATA_DIR / "Iris.csv",
@@ -939,6 +941,523 @@ def measure_peak_memory(func, *args):
     tracemalloc.stop()
     return result, peak / (1024 ** 2)
 
+# ---------------- VECTORIZATION BENCHMARK HELPERS ---------------- #
+
+def _time_call(func, *args, repeats=5):
+    """
+    Time a function and return the best runtime across repeats.
+    """
+    func(*args)  # warm-up
+
+    times = []
+    result = None
+
+    for _ in range(repeats):
+        start = time.perf_counter()
+        result = func(*args)
+        times.append(time.perf_counter() - start)
+
+    return min(times), result
+
+
+def _results_close(a, b):
+    """
+    Check that loop and vectorized outputs are numerically equivalent.
+    """
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        return len(a) == len(b) and all(
+            _results_close(x, y) for x, y in zip(a, b)
+        )
+
+    try:
+        return bool(np.allclose(a, b, equal_nan=True))
+    except (TypeError, ValueError):
+        return bool(np.array_equal(a, b))
+
+
+# ---------- Confusion matrix: loop vs vectorized ---------- #
+
+def _loop_confusion_matrix(y_true, y_pred, classes):
+    """
+    Loop-based confusion matrix kept only for benchmarking.
+    """
+    cm = np.zeros((len(classes), len(classes)), dtype=int)
+
+    for i, c_true in enumerate(classes):
+        for j, c_pred in enumerate(classes):
+            cm[i, j] = np.sum((y_true == c_true) & (y_pred == c_pred))
+
+    return cm
+
+
+def _vectorized_confusion_matrix(y_true, y_pred, classes):
+    """
+    Vectorized confusion matrix using flat bincount indexing.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    classes = np.asarray(classes)
+
+    sort_order = np.argsort(classes)
+    sorted_classes = classes[sort_order]
+
+    true_pos_sorted = np.searchsorted(sorted_classes, y_true)
+    pred_pos_sorted = np.searchsorted(sorted_classes, y_pred)
+
+    valid = (
+        (true_pos_sorted >= 0) &
+        (true_pos_sorted < len(sorted_classes)) &
+        (pred_pos_sorted >= 0) &
+        (pred_pos_sorted < len(sorted_classes))
+    )
+
+    valid_indices = np.where(valid)[0]
+
+    valid[valid_indices] &= (
+        (sorted_classes[true_pos_sorted[valid_indices]] == y_true[valid_indices]) &
+        (sorted_classes[pred_pos_sorted[valid_indices]] == y_pred[valid_indices])
+    )
+
+    true_idx = sort_order[true_pos_sorted[valid]]
+    pred_idx = sort_order[pred_pos_sorted[valid]]
+
+    flat_idx = true_idx * len(classes) + pred_idx
+
+    return np.bincount(
+        flat_idx,
+        minlength=len(classes) * len(classes)
+    ).reshape(len(classes), len(classes))
+
+
+# ---------- NaN mean/variance: loop vs NumPy ---------- #
+
+def _loop_nanmean_nanvar(X):
+    """
+    Mostly loop-based column-wise NaN-aware mean and variance.
+    Kept only for benchmarking against vectorized implementation.
+    """
+    X = np.asarray(X, dtype=float)
+
+    means = np.zeros(X.shape[1], dtype=float)
+    variances = np.zeros(X.shape[1], dtype=float)
+
+    for j in range(X.shape[1]):
+        total = 0.0
+        count = 0
+
+        for i in range(X.shape[0]):
+            value = X[i, j]
+
+            if not np.isnan(value):
+                total += value
+                count += 1
+
+        if count == 0:
+            means[j] = np.nan
+            variances[j] = np.nan
+            continue
+
+        mean_value = total / count
+        means[j] = mean_value
+
+        squared_error_total = 0.0
+
+        for i in range(X.shape[0]):
+            value = X[i, j]
+
+            if not np.isnan(value):
+                diff = value - mean_value
+                squared_error_total += diff * diff
+
+        variances[j] = squared_error_total / count
+
+    return means, variances
+
+
+def _vectorized_nanmean_nanvar(X):
+    """
+    Vectorized column-wise NaN-aware mean and variance using sums and squared sums.
+    """
+    X = np.asarray(X, dtype=float)
+
+    valid = ~np.isnan(X)
+    counts = np.sum(valid, axis=0)
+
+    X_zeroed = np.where(valid, X, 0.0)
+
+    sums = np.sum(X_zeroed, axis=0)
+    squared_sums = np.sum(X_zeroed ** 2, axis=0)
+
+    means = np.divide(
+        sums,
+        counts,
+        out=np.full(X.shape[1], np.nan, dtype=float),
+        where=counts != 0
+    )
+
+    variances = np.divide(
+        squared_sums,
+        counts,
+        out=np.full(X.shape[1], np.nan, dtype=float),
+        where=counts != 0
+    ) - means ** 2
+
+    variances = np.maximum(variances, 0.0)
+
+    return means, variances
+
+
+# ---------- Ensemble voting: loop vs vectorized ---------- #
+
+def _loop_hard_vote(votes, classes):
+    """
+    Loop-based hard voting.
+
+    votes shape: (n_samples, n_estimators)
+    """
+    predictions = []
+
+    for row in votes:
+        counts = np.asarray([np.sum(row == cls) for cls in classes])
+        predictions.append(classes[np.argmax(counts)])
+
+    return np.asarray(predictions)
+
+
+def _vectorized_hard_vote(votes, classes):
+    """
+    Vectorized hard voting using indexed accumulation.
+    """
+    votes = np.asarray(votes)
+    classes = np.asarray(classes)
+
+    sort_order = np.argsort(classes)
+    sorted_classes = classes[sort_order]
+
+    flat_votes = votes.ravel()
+    flat_pos_sorted = np.searchsorted(sorted_classes, flat_votes)
+
+    valid = (
+        (flat_pos_sorted < len(sorted_classes)) &
+        (sorted_classes[flat_pos_sorted] == flat_votes)
+    )
+
+    if not np.all(valid):
+        raise ValueError("votes contain classes not present in classes")
+
+    flat_pos_original = sort_order[flat_pos_sorted]
+
+    vote_counts = np.zeros((votes.shape[0], len(classes)), dtype=int)
+    rows = np.repeat(np.arange(votes.shape[0]), votes.shape[1])
+
+    np.add.at(vote_counts, (rows, flat_pos_original), 1)
+
+    return classes[np.argmax(vote_counts, axis=1)]
+
+
+# ---------- Tree split scoring: loop vs vectorized ---------- #
+
+def _gini_from_counts(counts):
+    """
+    Compute Gini impurity from class counts.
+    """
+    total = np.sum(counts)
+
+    if total <= 0:
+        return 0.0
+
+    probs = counts / total
+    return 1.0 - np.sum(probs ** 2)
+
+
+def _loop_best_split_single_feature(feature, y, sample_weight, classes):
+    """
+    Loop-based split scoring for one feature.
+
+    This is kept only as a baseline for benchmarking the vectorized tree logic.
+    """
+    feature = np.asarray(feature, dtype=float)
+    y = np.asarray(y)
+    sample_weight = np.asarray(sample_weight, dtype=float)
+    classes = np.asarray(classes)
+
+    unique_values = np.unique(feature)
+
+    if unique_values.size <= 1:
+        return np.nan, 0.0
+
+    thresholds = (unique_values[:-1] + unique_values[1:]) / 2.0
+
+    total_counts = np.asarray([
+        np.sum(sample_weight[y == cls]) for cls in classes
+    ])
+
+    parent_impurity = _gini_from_counts(total_counts)
+    total_weight = np.sum(sample_weight)
+
+    best_threshold = np.nan
+    best_gain = -np.inf
+
+    for threshold in thresholds:
+        left_mask = feature <= threshold
+        right_mask = ~left_mask
+
+        if not np.any(left_mask) or not np.any(right_mask):
+            continue
+
+        left_counts = np.asarray([
+            np.sum(sample_weight[left_mask & (y == cls)]) for cls in classes
+        ])
+
+        right_counts = total_counts - left_counts
+
+        left_weight = np.sum(left_counts)
+        right_weight = np.sum(right_counts)
+
+        child_impurity = (
+            left_weight * _gini_from_counts(left_counts) +
+            right_weight * _gini_from_counts(right_counts)
+        ) / max(total_weight, 1e-12)
+
+        gain = parent_impurity - child_impity if False else parent_impurity - child_impurity
+
+        if gain > best_gain:
+            best_gain = gain
+            best_threshold = threshold
+
+    return best_threshold, best_gain
+
+
+def _vectorized_best_split_single_feature(feature, y, sample_weight, classes):
+    """
+    Vectorized split scoring for one feature using sorting and cumulative counts.
+    """
+    feature = np.asarray(feature, dtype=float)
+    y = np.asarray(y)
+    sample_weight = np.asarray(sample_weight, dtype=float)
+    classes = np.asarray(classes)
+
+    order = np.argsort(feature)
+
+    sorted_values = feature[order]
+    sorted_y = y[order]
+    sorted_weights = sample_weight[order]
+
+    sort_order = np.argsort(classes)
+    sorted_classes = classes[sort_order]
+
+    class_idx_sorted = np.searchsorted(sorted_classes, sorted_y)
+    class_idx_original = sort_order[class_idx_sorted]
+
+    n_classes = len(classes)
+
+    one_hot_weighted = (
+        np.eye(n_classes)[class_idx_original] *
+        sorted_weights[:, None]
+    )
+
+    total_counts = np.sum(one_hot_weighted, axis=0)
+    parent_impurity = _gini_from_counts(total_counts)
+    total_weight = np.sum(total_counts)
+
+    if sorted_values.size <= 1:
+        return np.nan, 0.0
+
+    left_counts = np.cumsum(one_hot_weighted, axis=0)[:-1]
+    right_counts = total_counts[None, :] - left_counts
+
+    left_weight = np.sum(left_counts, axis=1)
+    right_weight = total_weight - left_weight
+
+    valid_splits = (
+        (sorted_values[:-1] != sorted_values[1:]) &
+        (left_weight > 0) &
+        (right_weight > 0)
+    )
+
+    if not np.any(valid_splits):
+        return np.nan, 0.0
+
+    left_probs = left_counts / np.maximum(left_weight[:, None], 1e-12)
+    right_probs = right_counts / np.maximum(right_weight[:, None], 1e-12)
+
+    left_gini = 1.0 - np.sum(left_probs ** 2, axis=1)
+    right_gini = 1.0 - np.sum(right_probs ** 2, axis=1)
+
+    child_impurity = (
+        left_weight * left_gini +
+        right_weight * right_gini
+    ) / np.maximum(total_weight, 1e-12)
+
+    gains = parent_impurity - child_impurity
+    gains[~valid_splits] = -np.inf
+
+    best_idx = int(np.argmax(gains))
+    best_threshold = (sorted_values[best_idx] + sorted_values[best_idx + 1]) / 2.0
+
+    return best_threshold, gains[best_idx]
+
+
+def benchmark_vectorization(n_samples=20000, n_features=20, n_classes=4,
+                            n_estimators=25, repeats=5, random_state=42,
+                            save_csv=True):
+    """
+    Compare loop-based and vectorized implementations for core numerical work.
+
+    This benchmark is separate from model benchmarking. It exists to provide
+    evidence for the vectorization design requirement.
+    """
+    rng = np.random.default_rng(random_state)
+
+    classes = np.arange(n_classes, dtype=int)
+
+    y_true = rng.integers(0, n_classes, size=n_samples)
+    y_pred = rng.integers(0, n_classes, size=n_samples)
+
+    X = rng.normal(size=(n_samples, n_features))
+    nan_mask = rng.random(size=X.shape) < 0.03
+    X[nan_mask] = np.nan
+
+    votes = rng.integers(
+        0,
+        n_classes,
+        size=(n_samples, n_estimators)
+    )
+
+    feature = rng.normal(size=n_samples)
+    split_y = rng.integers(0, n_classes, size=n_samples)
+    sample_weight = np.ones(n_samples, dtype=float)
+
+    benchmarks = [
+        {
+            "operation": "confusion_matrix",
+            "loop_func": _loop_confusion_matrix,
+            "vectorized_func": _vectorized_confusion_matrix,
+            "args": (y_true, y_pred, classes),
+            "n_samples": n_samples,
+            "n_features": 0,
+        },
+        {
+            "operation": "nanmean_nanvar",
+            "loop_func": _loop_nanmean_nanvar,
+            "vectorized_func": _vectorized_nanmean_nanvar,
+            "args": (X,),
+            "n_samples": n_samples,
+            "n_features": n_features,
+        },
+        {
+            "operation": "hard_voting",
+            "loop_func": _loop_hard_vote,
+            "vectorized_func": _vectorized_hard_vote,
+            "args": (votes, classes),
+            "n_samples": n_samples,
+            "n_features": n_estimators,
+        },
+        {
+            "operation": "tree_split_single_feature",
+            "loop_func": _loop_best_split_single_feature,
+            "vectorized_func": _vectorized_best_split_single_feature,
+            "args": (feature, split_y, sample_weight, classes),
+            "n_samples": n_samples,
+            "n_features": 1,
+        },
+    ]
+
+    results = []
+
+    for item in benchmarks:
+        loop_time, loop_result = _time_call(
+            item["loop_func"],
+            *item["args"],
+            repeats=repeats
+        )
+
+        vectorized_time, vectorized_result = _time_call(
+            item["vectorized_func"],
+            *item["args"],
+            repeats=repeats
+        )
+
+        speedup = loop_time / vectorized_time if vectorized_time > 0 else np.inf
+
+        results.append({
+            "operation": item["operation"],
+            "n_samples": item["n_samples"],
+            "n_features": item["n_features"],
+            "loop_time": loop_time,
+            "vectorized_time": vectorized_time,
+            "speedup": speedup,
+            "outputs_match": _results_close(loop_result, vectorized_result),
+        })
+
+    print_vectorization_results(results)
+
+    if save_csv:
+        save_vectorization_results(results)
+
+    return results
+
+
+def print_vectorization_results(results):
+    """
+    Print vectorization benchmark results.
+    """
+    if not results:
+        print("No vectorization benchmark results to show.")
+        return
+
+    print("\nVECTORIZATION BENCHMARK")
+    print("Loop-based baselines are kept only for comparison.")
+    print("-" * 100)
+
+    print(
+        f"{'Operation':<28}"
+        f"{'Samples':<12}"
+        f"{'Features':<10}"
+        f"{'Loop(s)':<12}"
+        f"{'Vector(s)':<12}"
+        f"{'Speedup':<12}"
+        f"{'Match':<8}"
+    )
+    print("-" * 100)
+
+    for r in results:
+        print(
+            f"{r['operation']:<28}"
+            f"{r['n_samples']:<12}"
+            f"{r['n_features']:<10}"
+            f"{r['loop_time']:<12.6f}"
+            f"{r['vectorized_time']:<12.6f}"
+            f"{r['speedup']:<12.2f}"
+            f"{str(r['outputs_match']):<8}"
+        )
+
+
+def save_vectorization_results(results):
+    """
+    Save vectorization benchmark results to CSV.
+    """
+    if not results:
+        return
+
+    VECTORIZATION_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "operation",
+        "n_samples",
+        "n_features",
+        "loop_time",
+        "vectorized_time",
+        "speedup",
+        "outputs_match",
+    ]
+
+    with open(VECTORIZATION_OUT_PATH, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    print(f"\nSaved vectorization benchmark results to: {VECTORIZATION_OUT_PATH}")
 
 def balanced_accuracy_multiclass(y_true, y_pred):
     """
@@ -1360,6 +1879,15 @@ def main():
         n_estimators=10,
     )
 
+    benchmark_vectorization(
+        n_samples=50000,
+        n_features=50,
+        n_classes=20,
+        n_estimators=25,
+        repeats=5,
+        random_state=42,
+        save_csv=True,
+    )
 
 if __name__ == "__main__":
     main()

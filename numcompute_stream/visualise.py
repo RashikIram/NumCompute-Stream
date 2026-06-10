@@ -736,7 +736,11 @@ def plot_feature_histogram(X, feature_index, bins=20, title=None,
 
 def plot_roc_curve(fpr, tpr, title="ROC Curve", save_path=None, show=True):
     """
-    Plot ROC curve from false-positive and true-positive rates.
+    Plot a single ROC curve from false-positive and true-positive rates.
+
+    This can be used for binary ROC-AUC or for one class in a one-vs-rest
+    multiclass ROC-AUC setup. For plotting all multiclass one-vs-rest curves,
+    use plot_multiclass_roc_curves().
 
     Parameters
     ----------
@@ -782,5 +786,135 @@ def plot_roc_curve(fpr, tpr, title="ROC Curve", save_path=None, show=True):
     ax.set_ylim(0, 1.05)
     ax.grid(True, alpha=0.3)
     ax.legend(loc="lower right")
+
+    return _finalize_plot(fig, save_path, show)
+
+def _binary_roc_curve_for_plot(y_true_binary, y_scores):
+    """
+    Compute a binary ROC curve for plotting.
+    """
+    y_true_binary = _validate_1d(y_true_binary, name="y_true_binary")
+    y_scores = _validate_1d(y_scores, name="y_scores")
+
+    if y_true_binary.shape != y_scores.shape:
+        raise ValueError("y_true_binary and y_scores must have the same shape")
+
+    unique = np.unique(y_true_binary)
+
+    if not np.all(np.isin(unique, [0, 1])):
+        raise ValueError("y_true_binary must contain only 0 and 1")
+
+    if len(unique) < 2:
+        raise ValueError("ROC curve requires both positive and negative samples")
+
+    order = np.argsort(-y_scores)
+    y_true_sorted = y_true_binary[order]
+
+    tp = np.cumsum(y_true_sorted == 1)
+    fp = np.cumsum(y_true_sorted == 0)
+
+    tp_total = tp[-1]
+    fp_total = fp[-1]
+
+    if tp_total == 0 or fp_total == 0:
+        raise ValueError("ROC curve requires both positive and negative samples")
+
+    tpr = np.concatenate([[0.0], tp / tp_total, [1.0]])
+    fpr = np.concatenate([[0.0], fp / fp_total, [1.0]])
+
+    return fpr, tpr
+
+
+def _auc_for_plot(fpr, tpr):
+    """
+    Compute AUC using the trapezoidal rule.
+    """
+    return float(np.trapezoid(tpr, fpr))
+
+
+def plot_multiclass_roc_curves(y_true, y_scores, classes=None,
+                               title="Multiclass ROC Curve",
+                               save_path=None, show=True):
+    """
+    Plot one-vs-rest ROC curves for multiclass classification.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True class labels. Labels must correspond to the class order used by
+        the columns of y_scores.
+    y_scores : array-like of shape (n_samples, n_classes)
+        Predicted class probabilities or confidence scores.
+    classes : array-like, optional
+        Class labels corresponding to y_scores columns. If None, class labels
+        are assumed to be 0, 1, ..., n_classes - 1.
+    title : str, default="Multiclass ROC Curve"
+        Plot title.
+    save_path : str, optional
+        File path for saving the plot.
+    show : bool, default=True
+        Whether to display the plot.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+
+    Raises
+    ------
+    ValueError
+        If inputs have invalid shapes or class labels are inconsistent.
+
+    Complexity
+    ----------
+    Time: O(n_classes * n_samples log n_samples)
+    Space: O(n_samples)
+    """
+    y_true = _validate_1d(y_true, name="y_true")
+    y_scores = _validate_2d(y_scores, name="y_scores")
+
+    if y_scores.shape[0] != len(y_true):
+        raise ValueError("y_true and y_scores must contain the same number of samples")
+
+    n_classes = y_scores.shape[1]
+
+    if classes is None:
+        classes = np.arange(n_classes)
+    else:
+        classes = _validate_1d(classes, name="classes")
+
+    if len(classes) != n_classes:
+        raise ValueError("number of classes must match y_scores columns")
+
+    fig, ax = plt.subplots(figsize=(7.0, 5.4))
+
+    plotted = 0
+
+    for idx, cls in enumerate(classes):
+        y_true_binary = (y_true == cls).astype(int)
+
+        # Skip classes that cannot form a valid one-vs-rest ROC curve.
+        if np.sum(y_true_binary) == 0 or np.sum(y_true_binary) == len(y_true_binary):
+            continue
+
+        fpr, tpr = _binary_roc_curve_for_plot(y_true_binary, y_scores[:, idx])
+        class_auc = _auc_for_plot(fpr, tpr)
+
+        ax.plot(
+            fpr,
+            tpr,
+            linewidth=2.0,
+            label=f"Class {cls} (AUC={class_auc:.3f})"
+        )
+        plotted += 1
+
+    if plotted == 0:
+        raise ValueError("No valid one-vs-rest ROC curves could be computed")
+
+    ax.plot([0, 1], [0, 1], linestyle="--", label="Random")
+    _style_axis(ax, title, "False Positive Rate", "True Positive Rate")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3)
+    _place_legend(ax, plotted + 1)
 
     return _finalize_plot(fig, save_path, show)

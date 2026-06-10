@@ -401,7 +401,7 @@ class DecisionTreeClassifier:
         if len(np.unique(y)) == 1:
             return True
         return False
-
+    
     def _best_split(self, X, y, sample_weight):
         best_feature = None
         best_threshold = None
@@ -412,6 +412,14 @@ class DecisionTreeClassifier:
         parent_impurity = self._impurity(y, sample_weight)
         features = self._select_features(X.shape[1])
 
+        y_class_idx, n_classes = self._class_indices_sorted(y)
+        total_counts = self._weighted_counts_from_indices(
+            y_class_idx,
+            sample_weight,
+            n_classes
+        )
+        total_weight = np.sum(sample_weight)
+
         for feature in features:
             values = X[:, feature]
             valid_mask = ~np.isnan(values)
@@ -419,14 +427,15 @@ class DecisionTreeClassifier:
             if np.sum(valid_mask) < self.min_samples_split:
                 continue
 
-            unique_values = np.unique(values[valid_mask])
+            valid_values = values[valid_mask]
 
-            if len(unique_values) <= 1:
+            if np.unique(valid_values).size <= 1:
                 continue
 
+            # Random splitter can stay simple because it usually has very few thresholds.
             if self.splitter == "random":
-                low = unique_values[0]
-                high = unique_values[-1]
+                unique_values = np.unique(valid_values)
+                low, high = unique_values[0], unique_values[-1]
 
                 if low == high:
                     continue
@@ -436,31 +445,99 @@ class DecisionTreeClassifier:
                     high,
                     size=self.n_random_thresholds
                 )
-            else:
-                thresholds = (unique_values[:-1] + unique_values[1:]) / 2.0
 
-            for threshold in thresholds:
-                # NaNs go to the right branch as a deterministic fallback.
+                for threshold in thresholds:
+                    left_mask = values <= threshold
+                    right_mask = ~left_mask
+
+                    if np.sum(left_mask) == 0 or np.sum(right_mask) == 0:
+                        continue
+
+                    gain = self._information_gain(
+                        y,
+                        sample_weight,
+                        left_mask,
+                        right_mask,
+                        parent_impurity
+                    )
+
+                    if gain > best_gain:
+                        best_feature = feature
+                        best_threshold = threshold
+                        best_gain = gain
+                        best_left_mask = left_mask
+                        best_right_mask = right_mask
+
+                continue
+
+            # Vectorized best-threshold scoring.
+            valid_indices = np.where(valid_mask)[0]
+            order = np.argsort(valid_values)
+
+            sorted_indices = valid_indices[order]
+            sorted_values = values[sorted_indices]
+            sorted_class_idx = y_class_idx[sorted_indices]
+            sorted_weights = sample_weight[sorted_indices]
+
+            one_hot_weighted = np.eye(n_classes)[sorted_class_idx] * sorted_weights[:, None]
+
+            left_counts = np.cumsum(one_hot_weighted, axis=0)[:-1]
+            right_counts = total_counts[None, :] - left_counts
+
+            left_weight = np.sum(left_counts, axis=1)
+            right_weight = total_weight - left_weight
+
+            valid_splits = (
+                (sorted_values[:-1] != sorted_values[1:]) &
+                (left_weight > 0) &
+                (right_weight > 0)
+            )
+
+            if not np.any(valid_splits):
+                continue
+
+            left_probs = left_counts / np.maximum(left_weight[:, None], 1e-12)
+            right_probs = right_counts / np.maximum(right_weight[:, None], 1e-12)
+
+            if self.criterion == "gini":
+                left_impurity = 1.0 - np.sum(left_probs ** 2, axis=1)
+                right_impurity = 1.0 - np.sum(right_probs ** 2, axis=1)
+            else:
+                left_log = np.zeros_like(left_probs)
+                right_log = np.zeros_like(right_probs)
+
+                np.log2(left_probs, out=left_log, where=left_probs > 0)
+                np.log2(right_probs, out=right_log, where=right_probs > 0)
+
+                left_impurity = -np.sum(left_probs * left_log, axis=1)
+                right_impurity = -np.sum(right_probs * right_log, axis=1)
+
+                
+            child_impurity = (
+                left_weight * left_impurity +
+                right_weight * right_impurity
+            ) / np.maximum(total_weight, 1e-12)
+
+            gains = parent_impurity - child_impurity
+            gains[~valid_splits] = -np.inf
+
+            local_best_idx = int(np.argmax(gains))
+            local_best_gain = gains[local_best_idx]
+
+            if local_best_gain > best_gain:
+                threshold = (
+                    sorted_values[local_best_idx] +
+                    sorted_values[local_best_idx + 1]
+                ) / 2.0
+
                 left_mask = values <= threshold
                 right_mask = ~left_mask
 
-                if np.sum(left_mask) == 0 or np.sum(right_mask) == 0:
-                    continue
-
-                gain = self._information_gain(
-                    y,
-                    sample_weight,
-                    left_mask,
-                    right_mask,
-                    parent_impurity
-                )
-
-                if gain > best_gain:
-                    best_feature = feature
-                    best_threshold = threshold
-                    best_gain = gain
-                    best_left_mask = left_mask
-                    best_right_mask = right_mask
+                best_feature = feature
+                best_threshold = threshold
+                best_gain = local_best_gain
+                best_left_mask = left_mask
+                best_right_mask = right_mask
 
         if best_feature is None:
             return None
@@ -490,6 +567,55 @@ class DecisionTreeClassifier:
             raise ValueError("max_features must be None, int, float, 'sqrt', or 'log2'")
 
         return self._rng.choice(n_features, size=k, replace=False)
+    
+    def _class_indices_sorted(self, y):
+        """
+        Map labels to integer class indices using sorted class order.
+
+        This is used internally for vectorized class-count operations.
+        """
+        sorted_classes = np.sort(self.classes_)
+        idx = np.searchsorted(sorted_classes, y)
+
+        valid = (
+            (idx >= 0) &
+            (idx < len(sorted_classes)) &
+            (sorted_classes[idx] == y)
+        )
+
+        if not np.all(valid):
+            raise ValueError("y contains labels not present in classes_")
+
+        return idx, len(sorted_classes)
+
+
+    def _weighted_counts_from_indices(self, class_idx, sample_weight, n_classes):
+        """
+        Compute weighted class counts using np.bincount.
+        """
+        return np.bincount(
+            class_idx,
+            weights=sample_weight,
+            minlength=n_classes
+        ).astype(float)
+
+
+    def _impurity_from_counts(self, counts):
+        """
+        Compute Gini or entropy from class-count vector.
+        """
+        total = np.sum(counts)
+
+        if total <= 0:
+            return 0.0
+
+        probs = counts / total
+        probs = probs[probs > 0]
+
+        if self.criterion == "gini":
+            return 1.0 - np.sum(probs ** 2)
+
+        return -np.sum(probs * np.log2(probs))
 
     def _information_gain(self, y, sample_weight, left_mask, right_mask, parent_impurity):
         left_weight = np.sum(sample_weight[left_mask])
@@ -508,48 +634,43 @@ class DecisionTreeClassifier:
         )
 
         return parent_impurity - child_impurity
-
+    
     def _impurity(self, y, sample_weight):
         if len(y) == 0:
             return 0.0
 
-        total_weight = np.sum(sample_weight)
+        class_idx, n_classes = self._class_indices_sorted(y)
+        counts = self._weighted_counts_from_indices(class_idx, sample_weight, n_classes)
 
-        if total_weight == 0:
-            return 0.0
-
-        probs = []
-        for cls in np.unique(y):
-            probs.append(np.sum(sample_weight[y == cls]) / total_weight)
-
-        probs = np.asarray(probs, dtype=float)
-
-        if self.criterion == "gini":
-            return 1.0 - np.sum(probs ** 2)
-
-        probs = probs[probs > 0]
-        return -np.sum(probs * np.log2(probs))
+        return self._impurity_from_counts(counts)
 
     def _majority_class(self, y, sample_weight):
         classes = np.unique(y)
-        weights = np.asarray([
-            np.sum(sample_weight[y == cls]) for cls in classes
-        ])
+        sort_order = np.argsort(classes)
+        sorted_classes = classes[sort_order]
 
-        # np.unique returns sorted classes, so argmax gives deterministic tie-breaking.
-        return classes[np.argmax(weights)]
+        idx = np.searchsorted(sorted_classes, y)
+        counts = np.bincount(idx, weights=sample_weight, minlength=len(sorted_classes))
+
+        return sorted_classes[np.argmax(counts)]
 
     def _class_probabilities(self, y, sample_weight):
         probabilities = np.zeros(len(self.classes_), dtype=float)
         total_weight = np.sum(sample_weight)
 
-        if total_weight == 0:
+        if total_weight <= 0:
             return probabilities
 
-        for i, cls in enumerate(self.classes_):
-            probabilities[i] = np.sum(sample_weight[y == cls]) / total_weight
+        sort_order = np.argsort(self.classes_)
+        sorted_classes = self.classes_[sort_order]
 
-        return probabilities
+        idx = np.searchsorted(sorted_classes, y)
+        counts_sorted = np.bincount(idx, weights=sample_weight, minlength=len(sorted_classes))
+
+        counts_original_order = np.zeros_like(counts_sorted, dtype=float)
+        counts_original_order[sort_order] = counts_sorted
+
+        return counts_original_order / total_weight
 
     def _predict_one(self, row, node):
         while not node["is_leaf"]:

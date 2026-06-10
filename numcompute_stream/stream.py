@@ -2,7 +2,7 @@ import time
 import tracemalloc
 import numpy as np
 
-from numcompute.metrics import accuracy, confusion_matrix
+from numcompute_stream.metrics import accuracy, confusion_matrix
 
 
 class StreamTrainer:
@@ -63,6 +63,33 @@ class StreamTrainer:
         self.total_correct = 0
         self.total_scored = 0
         self.chunk_index = 0
+        self._has_fitted = self._infer_model_is_fitted()
+
+    def _infer_model_is_fitted(self):
+        """
+        Best-effort check for models that were already fitted before being passed
+        into StreamTrainer.
+        """
+        for attr in ("n_samples_seen_", "n_samples_seen"):
+            value = getattr(self.model, attr, 0)
+            try:
+                if np.asarray(value).sum() > 0:
+                    return True
+            except Exception:
+                pass
+
+        for attr in ("classes_", "root_", "estimators_"):
+            value = getattr(self.model, attr, None)
+
+            if value is None:
+                continue
+
+            if isinstance(value, (list, tuple)) and len(value) == 0:
+                continue
+
+            return True
+
+        return False
 
     def _validate_chunk(self, X, y=None):
         """
@@ -163,6 +190,8 @@ class StreamTrainer:
             current_memory = 0
             peak_memory = 0
 
+        self._has_fitted = True
+
         fit_time = time.perf_counter() - start
 
         self.n_samples_seen += len(y_chunk)
@@ -180,7 +209,7 @@ class StreamTrainer:
 
         return self
 
-    def score_chunk(self, X_chunk, y_chunk):
+    def score_chunk(self, X_chunk, y_chunk, chunk_id=None):
         """
         Score the wrapped model on one incoming chunk.
 
@@ -209,6 +238,13 @@ class StreamTrainer:
         """
         X_chunk, y_chunk = self._validate_chunk(X_chunk, y_chunk)
 
+        if not self._has_fitted:
+            raise ValueError(
+                "Cannot score before the model has been fitted. "
+                "Call fit_chunk() first, or use fit_score_chunk(score_before_fit=True), "
+                "which skips the first prequential score automatically."
+            )
+
         start = time.perf_counter()
         y_pred = self.model.predict(X_chunk)
         score_time = time.perf_counter() - start
@@ -232,7 +268,7 @@ class StreamTrainer:
             cm = confusion_matrix(y_chunk, y_pred, classes=self.classes)
 
         metrics = {
-            "chunk": self.chunk_index,
+            "chunk": self.chunk_index if chunk_id is None else chunk_id,
             "event": "score",
             "n_samples": len(y_chunk),
             "chunk_accuracy": chunk_accuracy,
@@ -256,16 +292,36 @@ class StreamTrainer:
         y_chunk : array-like of shape (n_samples,)
             Target chunk.
         score_before_fit : bool, default=False
-            If True, score before updating the model. If False, train first
-            and then score the same chunk.
+            If True, use prequential test-then-train evaluation. The first chunk is
+            trained without scoring when the model is not fitted yet. If False,
+            train first and then score the same chunk.
 
         Returns
         -------
         metrics : dict
-            Score metrics for the chunk.
+            Score metrics for the chunk, or a score-skipped log record for the first
+            prequential chunk when no fitted model exists yet.
         """
+        X_chunk, y_chunk = self._validate_chunk(X_chunk, y_chunk)
+
         if score_before_fit:
-            metrics = self.score_chunk(X_chunk, y_chunk)
+            next_chunk_id = self.chunk_index + 1
+
+            if not self._has_fitted:
+                skipped = {
+                    "chunk": next_chunk_id,
+                    "event": "score_skipped",
+                    "n_samples": len(y_chunk),
+                    "skipped": True,
+                    "reason": "First prequential chunk skipped because model is not fitted yet.",
+                    "score_time": 0.0,
+                }
+
+                self.logs.append(skipped)
+                self.fit_chunk(X_chunk, y_chunk)
+                return skipped
+
+            metrics = self.score_chunk(X_chunk, y_chunk, chunk_id=next_chunk_id)
             self.fit_chunk(X_chunk, y_chunk)
             return metrics
 
@@ -312,4 +368,5 @@ class StreamTrainer:
         self.total_correct = 0
         self.total_scored = 0
         self.chunk_index = 0
+        self._has_fitted = self._infer_model_is_fitted()
         return self

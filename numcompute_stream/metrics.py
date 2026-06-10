@@ -286,11 +286,31 @@ def confusion_matrix(y_true, y_pred, classes=None):
     y_true, y_pred = _validate_inputs(y_true, y_pred)
     classes = _get_classes(y_true, y_pred, classes)
 
+    classes = np.asarray(classes)
     cm = np.zeros((len(classes), len(classes)), dtype=int)
 
-    for i, c_true in enumerate(classes):
-        for j, c_pred in enumerate(classes):
-            cm[i, j] = np.sum((y_true == c_true) & (y_pred == c_pred))
+    # Supports custom class order safely.
+    sort_order = np.argsort(classes)
+    sorted_classes = classes[sort_order]
+
+    true_pos = np.searchsorted(sorted_classes, y_true)
+    pred_pos = np.searchsorted(sorted_classes, y_pred)
+
+    valid = (
+        (true_pos < len(classes)) &
+        (pred_pos < len(classes))
+    )
+
+    valid_true = valid.copy()
+    valid_true[valid] &= sorted_classes[true_pos[valid]] == y_true[valid]
+
+    valid_pred = valid_true.copy()
+    valid_pred[valid_true] &= sorted_classes[pred_pos[valid_true]] == y_pred[valid_true]
+
+    true_idx = sort_order[true_pos[valid_pred]]
+    pred_idx = sort_order[pred_pos[valid_pred]]
+
+    np.add.at(cm, (true_idx, pred_idx), 1)
 
     return cm
 
@@ -711,53 +731,129 @@ def auc(fpr, tpr):
     if len(fpr) < 2:
         raise ValueError("At least two points required to compute AUC")
 
-    return np.trapz(tpr, fpr)
+    return np.trapezoid(tpr, fpr)
+
+
+def _binary_auc_from_scores(y_true_binary, y_scores):
+    """
+    Compute binary ROC-AUC directly from labels and scores.
+    """
+    fpr, tpr = roc_curve(y_true_binary, y_scores)
+    return auc(fpr, tpr)
+
+
+def multiclass_roc_auc(y_true, y_scores, average="macro"):
+    """
+    Compute multiclass ROC-AUC using one-vs-rest strategy.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True class indices.
+
+    y_scores : array-like of shape (n_samples, n_classes)
+        Predicted probabilities or confidence scores.
+
+    average : {"macro", "weighted"}, default="macro"
+        Averaging strategy.
+
+    Returns
+    -------
+    float
+
+    Complexity
+    ----------
+    Time: O(c * n log n)
+    Space: O(n)
+    """
+    y_true, _ = _validate_inputs(y_true)
+
+    y_scores = np.asarray(y_scores, dtype=float)
+
+    if y_scores.ndim != 2:
+        raise ValueError("y_scores must be a 2D array")
+
+    if y_scores.shape[0] != len(y_true):
+        raise ValueError(
+            "y_true and y_scores must have the same number of samples"
+        )
+
+    n_classes = y_scores.shape[1]
+
+    if np.any(y_true < 0) or np.any(y_true >= n_classes):
+        raise ValueError(
+            "y_true contains class index outside score columns"
+        )
+
+    auc_scores = []
+    supports = []
+
+    for cls in range(n_classes):
+        binary_true = (y_true == cls).astype(int)
+
+        support = np.sum(binary_true)
+
+        if support == 0 or support == len(binary_true):
+            continue
+
+        class_auc = _binary_auc_from_scores(
+            binary_true,
+            y_scores[:, cls]
+        )
+
+        auc_scores.append(class_auc)
+        supports.append(support)
+
+    if len(auc_scores) == 0:
+        return 0.0
+
+    auc_scores = np.asarray(auc_scores)
+
+    if average == "macro":
+        return float(np.mean(auc_scores))
+
+    if average == "weighted":
+        supports = np.asarray(supports)
+        return float(
+            np.sum(auc_scores * supports) /
+            np.sum(supports)
+        )
+
+    raise ValueError(
+        "average must be 'macro' or 'weighted'"
+    )
 
 
 
 
 class StreamingROCAUC:
     """
-    Streaming binary ROC-AUC accumulator.
+    Streaming ROC-AUC accumulator.
 
-    Parameters
-    ----------
-    max_buffer : int or None, default=None
-        Maximum number of recent score/label pairs to store. If None, all
-        observed pairs are kept and cumulative ROC-AUC is returned.
-    positive_label : int or float, default=1
-        Label treated as the positive class.
+    Supports:
+    - binary ROC-AUC with 1D score array
+    - multiclass one-vs-rest ROC-AUC with 2D score/probability matrix
 
-    Methods
-    -------
-    update(y_true_chunk, y_score_chunk)
-    result()
-    reset()
-
-    Notes
-    -----
-    ROC-AUC is ranking-based, so it cannot be represented by only TP/FP counts.
-    This class buffers score/label pairs and recomputes the curve at result()
-    time. With max_buffer set, it becomes a rolling ROC-AUC metric.
-
-    Complexity
-    ----------
-    update: O(n)
-    result: O(w log w), where w is the buffer size
-    Space: O(w)
+    For multiclass use, y_true must contain class indices aligned with the
+    columns of y_score_chunk.
     """
 
-    def __init__(self, max_buffer=None, positive_label=1):
+    def __init__(self, max_buffer=None, positive_label=1, average="macro"):
         if max_buffer is not None and max_buffer <= 0:
             raise ValueError("max_buffer must be positive or None")
+        if average not in ("macro", "weighted"):
+            raise ValueError("average must be 'macro' or 'weighted'")
 
         self.max_buffer = max_buffer
         self.positive_label = positive_label
+        self.average = average
         self.reset()
 
     def reset(self):
         self.y_true_buffer = []
         self.y_score_buffer = []
+        self.score_ndim = None
+        self.n_classes = None
         return self
 
     def update(self, y_true_chunk, y_score_chunk):
@@ -767,14 +863,32 @@ class StreamingROCAUC:
         y_true_chunk = np.asarray(y_true_chunk)
         y_score_chunk = np.asarray(y_score_chunk, dtype=float)
 
-        if y_true_chunk.ndim != 1 or y_score_chunk.ndim != 1:
-            raise ValueError("y_true_chunk and y_score_chunk must be 1D arrays")
-        if y_true_chunk.shape != y_score_chunk.shape:
-            raise ValueError("y_true_chunk and y_score_chunk must have the same shape")
+        if y_true_chunk.ndim != 1:
+            raise ValueError("y_true_chunk must be 1D")
 
-        binary_labels = (y_true_chunk == self.positive_label).astype(int)
+        if y_score_chunk.ndim not in (1, 2):
+            raise ValueError("y_score_chunk must be 1D for binary or 2D for multiclass")
 
-        self.y_true_buffer.extend(binary_labels.tolist())
+        if y_score_chunk.shape[0] != len(y_true_chunk):
+            raise ValueError(
+                "y_true_chunk and y_score_chunk must contain the same number of samples"
+            )
+
+        if self.score_ndim is None:
+            self.score_ndim = y_score_chunk.ndim
+            if y_score_chunk.ndim == 2:
+                self.n_classes = y_score_chunk.shape[1]
+        elif self.score_ndim != y_score_chunk.ndim:
+            raise ValueError("Cannot mix binary 1D scores and multiclass 2D scores")
+
+        if y_score_chunk.ndim == 2:
+            if self.n_classes != y_score_chunk.shape[1]:
+                raise ValueError("Number of score columns changed between chunks")
+            stored_y = y_true_chunk
+        else:
+            stored_y = (y_true_chunk == self.positive_label).astype(int)
+
+        self.y_true_buffer.extend(stored_y.tolist())
         self.y_score_buffer.extend(y_score_chunk.tolist())
 
         if self.max_buffer is not None and len(self.y_true_buffer) > self.max_buffer:
@@ -793,24 +907,27 @@ class StreamingROCAUC:
         if len(np.unique(y_true)) < 2:
             return 0.0
 
-        fpr, tpr = roc_curve(y_true, y_scores)
-        return float(auc(fpr, tpr))
+        if y_scores.ndim == 1:
+            fpr, tpr = roc_curve(y_true, y_scores)
+            return float(auc(fpr, tpr))
+
+        return multiclass_roc_auc(y_true, y_scores, average=self.average)
 
 
 class RollingROCAUC(StreamingROCAUC):
     """
-    Rolling-window binary ROC-AUC accumulator.
+    Rolling-window ROC-AUC accumulator.
 
-    Parameters
-    ----------
-    window_size : int, default=100
-        Maximum number of recent score/label pairs stored.
-    positive_label : int or float, default=1
-        Label treated as the positive class.
+    Supports binary 1D scores and multiclass 2D score/probability matrices.
+    Keeps only the most recent window_size samples.
     """
 
-    def __init__(self, window_size=100, positive_label=1):
-        super().__init__(max_buffer=window_size, positive_label=positive_label)
+    def __init__(self, window_size=100, positive_label=1, average="macro"):
+        super().__init__(
+            max_buffer=window_size,
+            positive_label=positive_label,
+            average=average
+        )
 
 
 # ---------------- STREAMING METRICS ---------------- #
@@ -851,7 +968,7 @@ class StreamingConfusionMatrix:
             self.matrix = np.zeros((len(self.classes), len(self.classes)), dtype=int)
 
         return self
-
+    
     def _ensure_classes(self, y_true, y_pred):
         new_classes = np.unique(np.concatenate([y_true, y_pred]))
         all_classes = np.unique(np.concatenate([self.classes, new_classes]))
@@ -861,11 +978,9 @@ class StreamingConfusionMatrix:
 
         new_matrix = np.zeros((len(all_classes), len(all_classes)), dtype=int)
 
-        for i, old_true in enumerate(self.classes):
-            new_i = np.where(all_classes == old_true)[0][0]
-            for j, old_pred in enumerate(self.classes):
-                new_j = np.where(all_classes == old_pred)[0][0]
-                new_matrix[new_i, new_j] = self.matrix[i, j]
+        if len(self.classes) > 0:
+            old_positions = np.searchsorted(all_classes, self.classes)
+            new_matrix[np.ix_(old_positions, old_positions)] = self.matrix
 
         self.classes = all_classes
         self.matrix = new_matrix
@@ -992,7 +1107,7 @@ class StreamingF1:
         p = self.precision_metric.result()
         r = self.recall_metric.result()
         return _safe_divide(2 * p * r, p + r)
-
+    
 
 class StreamingBalancedAccuracy:
     """
@@ -1024,6 +1139,80 @@ class StreamingBalancedAccuracy:
         specificity_score = _safe_divide(self.tn, self.tn + self.fp)
 
         return (sensitivity + specificity_score) / 2
+    
+
+class StreamingMacroPrecision:
+    """
+    Streaming macro precision accumulator using cumulative confusion matrix.
+
+    Parameters
+    ----------
+    classes : array-like, optional
+        Fixed class labels. If None, classes are inferred over time.
+
+    Complexity
+    ----------
+    update: O(n * c)
+    result: O(c)
+    """
+
+    def __init__(self, classes=None):
+        self.cm = StreamingConfusionMatrix(classes=classes)
+
+    def reset(self):
+        self.cm.reset()
+        return self
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        self.cm.update(y_true_chunk, y_pred_chunk)
+        return self
+
+    def result(self):
+        matrix = self.cm.result()
+
+        if matrix.size == 0:
+            return 0.0
+
+        precision_scores, _, _, _ = _per_class_from_confusion_matrix(matrix)
+
+        return float(np.mean(precision_scores))
+    
+
+class StreamingMacroRecall:
+    """
+    Streaming macro recall accumulator using cumulative confusion matrix.
+
+    Parameters
+    ----------
+    classes : array-like, optional
+        Fixed class labels. If None, classes are inferred over time.
+
+    Complexity
+    ----------
+    update: O(n * c)
+    result: O(c)
+    """
+
+    def __init__(self, classes=None):
+        self.cm = StreamingConfusionMatrix(classes=classes)
+
+    def reset(self):
+        self.cm.reset()
+        return self
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        self.cm.update(y_true_chunk, y_pred_chunk)
+        return self
+
+    def result(self):
+        matrix = self.cm.result()
+
+        if matrix.size == 0:
+            return 0.0
+
+        _, recall_scores, _, _ = _per_class_from_confusion_matrix(matrix)
+
+        return float(np.mean(recall_scores))
 
 
 class StreamingMacroF1:
@@ -1061,6 +1250,91 @@ class StreamingMacroF1:
         _, _, f1_scores, _ = _per_class_from_confusion_matrix(matrix)
 
         return float(np.mean(f1_scores))
+
+
+class StreamingWeightedPrecision:
+    """
+    Streaming weighted precision accumulator using cumulative confusion matrix.
+
+    Parameters
+    ----------
+    classes : array-like, optional
+        Fixed class labels. If None, classes are inferred over time.
+
+    Complexity
+    ----------
+    update: O(n * c)
+    result: O(c)
+    """
+
+    def __init__(self, classes=None):
+        self.cm = StreamingConfusionMatrix(classes=classes)
+
+    def reset(self):
+        self.cm.reset()
+        return self
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        self.cm.update(y_true_chunk, y_pred_chunk)
+        return self
+
+    def result(self):
+        matrix = self.cm.result()
+
+        if matrix.size == 0:
+            return 0.0
+
+        precision_scores, _, _, support = _per_class_from_confusion_matrix(matrix)
+
+        if np.sum(support) == 0:
+            return 0.0
+
+        return float(
+            np.sum(precision_scores * support) / np.sum(support)
+        )
+
+
+class StreamingWeightedRecall:
+    """
+    Streaming weighted recall accumulator using cumulative confusion matrix.
+
+    Parameters
+    ----------
+    classes : array-like, optional
+        Fixed class labels. If None, classes are inferred over time.
+
+    Complexity
+    ----------
+    update: O(n * c)
+    result: O(c)
+    """
+
+    def __init__(self, classes=None):
+        self.cm = StreamingConfusionMatrix(classes=classes)
+
+    def reset(self):
+        self.cm.reset()
+        return self
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        self.cm.update(y_true_chunk, y_pred_chunk)
+        return self
+
+    def result(self):
+        matrix = self.cm.result()
+
+        if matrix.size == 0:
+            return 0.0
+
+        _, recall_scores, _, support = _per_class_from_confusion_matrix(matrix)
+
+        if np.sum(support) == 0:
+            return 0.0
+
+        return float(
+            np.sum(recall_scores * support) / np.sum(support)
+        )
+    
 
 
 class StreamingWeightedF1:

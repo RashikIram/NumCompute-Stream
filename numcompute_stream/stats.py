@@ -403,10 +403,13 @@ class StreamingStats:
     """
     Maintain streaming statistics for numeric chunks.
 
-    This implementation keeps the newer column-wise behaviour for 2D input, but
-    also supports the older 1D API expected by the tests: bins=..., histogram(),
-    quantiles(), scalar count/mean/variance for 1D streams, and NaN results for
-    an empty/all-NaN stream.
+    Mean and variance are updated online using a Welford/parallel-variance
+    update, so they do not require storing previous chunks.
+
+    Exact quantiles and the histogram() method require store_values=True because
+    exact quantiles need access to observed values. For memory-efficient
+    histograms without storing values, use StreamingHistogram with fixed bins or
+    a fixed value_range.
     """
 
     def __init__(self, store_values=True, bins=10, value_range=None):
@@ -420,6 +423,13 @@ class StreamingStats:
     def reset(self):
         self._data = [] if self.store_values else None
         self._is_1d = None
+
+        self._count = None
+        self._mean = None
+        self._M2 = None
+        self._min = None
+        self._max = None
+
         self.mean = None
         self.var = None
         self.std = None
@@ -445,81 +455,96 @@ class StreamingStats:
 
         if self._is_1d is None:
             self._is_1d = current_is_1d
+            n_features = 1 if current_is_1d else X_2d.shape[1]
+            self._count = np.zeros(n_features, dtype=int)
+            self._mean = np.zeros(n_features, dtype=float)
+            self._M2 = np.zeros(n_features, dtype=float)
+            self._min = np.full(n_features, np.nan, dtype=float)
+            self._max = np.full(n_features, np.nan, dtype=float)
+
+            if self.store_values and not current_is_1d:
+                self._data = [[] for _ in range(n_features)]
+
         elif self._is_1d != current_is_1d:
             raise ValueError("X_chunk dimensionality changed between updates")
 
-        if self.store_values:
-            valid_values = X_2d[~np.isnan(X_2d)] if current_is_1d else None
-            if current_is_1d:
-                self._data.extend(valid_values.tolist())
-            else:
-                if self._data == []:
-                    self._data = [[] for _ in range(X_2d.shape[1])]
-                if len(self._data) != X_2d.shape[1]:
-                    raise ValueError("X_chunk has different number of columns than previous chunks")
-                for j in range(X_2d.shape[1]):
-                    vals = X_2d[~np.isnan(X_2d[:, j]), j]
-                    self._data[j].extend(vals.tolist())
-        else:
-            # Keep minimal running raw arrays unnecessary; this compatibility
-            # path is intentionally exact only when store_values=True.
-            if not hasattr(self, "_running_chunks"):
-                self._running_chunks = []
-            self._running_chunks.append(X_2d.copy())
+        if not current_is_1d and X_2d.shape[1] != len(self._count):
+            raise ValueError("X_chunk has different number of columns than previous chunks")
 
-        self._recompute()
+        # Optional storage for exact quantiles and StreamingStats.histogram().
+        if self.store_values:
+            if current_is_1d:
+                values = X_2d[:, 0]
+                values = values[~np.isnan(values)]
+                self._data.extend(values.tolist())
+            else:
+                for j in range(X_2d.shape[1]):
+                    values = X_2d[:, j]
+                    values = values[~np.isnan(values)]
+                    self._data[j].extend(values.tolist())
+
+        self._update_running(X_2d)
+        self._sync_public_attributes()
         return self
 
-    def _observed_array(self):
-        if self.store_values:
-            if self._is_1d is False:
-                max_len = max((len(v) for v in self._data), default=0)
-                # Stats are recomputed column-wise directly for 2D; this method
-                # is mainly for 1D histogram/quantiles.
-                return self._data
-            return np.asarray(self._data, dtype=float)
-        chunks = getattr(self, "_running_chunks", [])
-        if not chunks:
-            return np.array([], dtype=float)
-        return np.vstack(chunks) if self._is_1d is False else np.concatenate([c.ravel() for c in chunks])
+    def _update_running(self, X_2d):
+        for j in range(X_2d.shape[1]):
+            values = X_2d[:, j]
+            values = values[~np.isnan(values)]
 
-    def _recompute(self):
-        if self._is_1d is False:
-            data_cols = self._data if self.store_values else [np.asarray(np.vstack(getattr(self, "_running_chunks", []))[:, j]) for j in range(getattr(self, "_running_chunks", [np.empty((0,0))])[-1].shape[1])]
-            n_features = len(data_cols)
-            counts = np.array([len(v) for v in data_cols], dtype=int)
-            means = np.full(n_features, np.nan)
-            vars_ = np.full(n_features, np.nan)
-            stds = np.full(n_features, np.nan)
-            mins = np.full(n_features, np.nan)
-            maxs = np.full(n_features, np.nan)
-            for j, vals in enumerate(data_cols):
-                vals = np.asarray(vals, dtype=float)
-                if vals.size:
-                    means[j] = np.mean(vals)
-                    vars_[j] = np.var(vals)
-                    stds[j] = np.std(vals)
-                    mins[j] = np.min(vals)
-                    maxs[j] = np.max(vals)
-            self.mean, self.var, self.std = means, vars_, stds
-            self.min, self.max, self.n_samples_seen = mins, maxs, counts
-            return
+            if values.size == 0:
+                continue
 
-        values = self._observed_array()
-        count = int(values.size)
-        self.n_samples_seen = count
-        if count == 0:
-            self.mean = np.nan
-            self.var = np.nan
-            self.std = np.nan
-            self.min = np.nan
-            self.max = np.nan
+            chunk_count = values.size
+            chunk_mean = np.mean(values)
+            chunk_M2 = np.sum((values - chunk_mean) ** 2)
+
+            old_count = self._count[j]
+            new_count = old_count + chunk_count
+
+            if old_count == 0:
+                self._mean[j] = chunk_mean
+                self._M2[j] = chunk_M2
+                self._min[j] = np.min(values)
+                self._max[j] = np.max(values)
+            else:
+                delta = chunk_mean - self._mean[j]
+                self._mean[j] = self._mean[j] + delta * chunk_count / new_count
+                self._M2[j] = (
+                    self._M2[j]
+                    + chunk_M2
+                    + delta ** 2 * old_count * chunk_count / new_count
+                )
+                self._min[j] = min(self._min[j], np.min(values))
+                self._max[j] = max(self._max[j], np.max(values))
+
+            self._count[j] = new_count
+
+    def _sync_public_attributes(self):
+        count = self._count
+        mean = np.where(count > 0, self._mean, np.nan)
+        var = np.divide(
+            self._M2,
+            count,
+            out=np.full_like(self._M2, np.nan, dtype=float),
+            where=count > 0
+        )
+        std = np.sqrt(var)
+
+        if self._is_1d:
+            self.n_samples_seen = int(count[0])
+            self.mean = float(mean[0])
+            self.var = float(var[0])
+            self.std = float(std[0])
+            self.min = float(self._min[0]) if count[0] > 0 else np.nan
+            self.max = float(self._max[0]) if count[0] > 0 else np.nan
         else:
-            self.mean = float(np.mean(values))
-            self.var = float(np.var(values))
-            self.std = float(np.std(values))
-            self.min = float(np.min(values))
-            self.max = float(np.max(values))
+            self.n_samples_seen = count.copy()
+            self.mean = mean.copy()
+            self.var = var.copy()
+            self.std = std.copy()
+            self.min = self._min.copy()
+            self.max = self._max.copy()
 
     def result(self):
         if self._is_1d is None:
@@ -531,6 +556,7 @@ class StreamingStats:
                 "max": np.nan,
                 "count": 0,
             }
+
         return {
             "mean": np.array(self.mean).copy() if isinstance(self.mean, np.ndarray) else self.mean,
             "variance": np.array(self.var).copy() if isinstance(self.var, np.ndarray) else self.var,
@@ -548,36 +574,64 @@ class StreamingStats:
 
     def quantile(self, q):
         if not self.store_values or self._data is None:
-            raise ValueError("quantile requires store_values=True")
+            raise ValueError(
+                "Exact quantile requires store_values=True. "
+                "Use an approximate quantile algorithm for memory-efficient streaming quantiles."
+            )
+
         q_arr = np.asarray(q, dtype=float)
+
         if np.any((q_arr < 0) | (q_arr > 1)):
             raise ValueError("q must be between 0 and 1")
+
         if self._is_1d is False:
             return np.asarray([
-                np.full(q_arr.shape, np.nan, dtype=float) if len(v) == 0 else np.quantile(np.asarray(v, dtype=float), q_arr)
+                np.full(q_arr.shape, np.nan, dtype=float)
+                if len(v) == 0
+                else np.quantile(np.asarray(v, dtype=float), q_arr)
                 for v in self._data
             ])
+
         values = np.asarray(self._data, dtype=float)
-        return np.full(q_arr.shape, np.nan, dtype=float) if values.size == 0 else np.quantile(values, q_arr)
+        return (
+            np.full(q_arr.shape, np.nan, dtype=float)
+            if values.size == 0
+            else np.quantile(values, q_arr)
+        )
 
     def quantiles(self, q):
         if not self.store_values or self._data is None:
-            raise ValueError("quantiles requires store_values=True")
+            raise ValueError(
+                "Exact quantiles require store_values=True. "
+                "Use an approximate quantile algorithm for memory-efficient streaming quantiles."
+            )
+
         q_arr = np.asarray(q, dtype=float)
+
         if np.any((q_arr < 0) | (q_arr > 100)):
             raise ValueError("q must be between 0 and 100")
+
         return self.quantile(q_arr / 100.0)
 
     def histogram(self):
         if not self.store_values or self._data is None:
-            raise ValueError("histogram requires store_values=True")
+            raise ValueError(
+                "StreamingStats.histogram() requires store_values=True. "
+                "For memory-efficient streaming histograms, use StreamingHistogram."
+            )
+
         if self._is_1d is False:
-            values = np.concatenate([np.asarray(v, dtype=float) for v in self._data]) if self._data else np.array([])
+            values = (
+                np.concatenate([np.asarray(v, dtype=float) for v in self._data])
+                if self._data
+                else np.array([])
+            )
         else:
             values = np.asarray(self._data, dtype=float)
+
         return histogram(values, bins=self.bins, value_range=self.value_range)
-
-
+    
+    
 class StreamingHistogram:
     """
     Maintain a streaming histogram for numeric data.
