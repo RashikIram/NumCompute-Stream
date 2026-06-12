@@ -130,7 +130,7 @@ The package is designed without external machine learning libraries and focuses 
 - Vectorisation microbenchmarks against loop-based baselines
 
 ### Testing
-- 293+ pytest cases
+- 312+ pytest cases
 - Tests for original NumCompute utilities and the new streaming extension
 - Coverage for normal workflows, invalid inputs, edge cases, streaming updates, metrics, preprocessing, stream trainer behaviour, visualisation, and benchmarking
 
