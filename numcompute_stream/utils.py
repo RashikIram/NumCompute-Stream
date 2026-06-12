@@ -2,16 +2,19 @@ import numpy as np
 
 def train_test_split(X, y, test_size=0.2, shuffle=True, random_state=None):
     """
-    Split dataset into training and testing sets.
+    Split dataset into training and testing sets using a stratified split.
+
+    This preserves class proportions in classification datasets by splitting
+    each class separately. It uses only NumPy.
 
     Parameters
     ----------
     X : array-like of shape (n_samples, n_features)
     y : array-like of shape (n_samples,)
     test_size : float, default=0.2
-        Proportion of data to use for testing.
+        Proportion of each class to use for testing.
     shuffle : bool, default=True
-        Whether to shuffle data before splitting.
+        Whether to shuffle samples within each class before splitting.
     random_state : int or None, default=None
         Seed for reproducibility.
 
@@ -29,19 +32,38 @@ def train_test_split(X, y, test_size=0.2, shuffle=True, random_state=None):
     if not (0 < test_size < 1):
         raise ValueError("test_size must be between 0 and 1")
 
-    n_samples = X.shape[0]
-    n_test = int(n_samples * test_size)
+    rng = np.random.default_rng(random_state)
 
-    indices = np.arange(n_samples)
+    train_indices = []
+    test_indices = []
+
+    for cls in np.unique(y):
+        cls_indices = np.where(y == cls)[0]
+
+        if shuffle:
+            rng.shuffle(cls_indices)
+
+        if len(cls_indices) == 1:
+            train_indices.extend(cls_indices.tolist())
+            continue
+
+        n_test = int(round(len(cls_indices) * test_size))
+        n_test = max(1, min(n_test, len(cls_indices) - 1))
+
+        test_indices.extend(cls_indices[:n_test].tolist())
+        train_indices.extend(cls_indices[n_test:].tolist())
+
+    train_indices = np.asarray(train_indices, dtype=int)
+    test_indices = np.asarray(test_indices, dtype=int)
 
     if shuffle:
-        rng = np.random.default_rng(random_state)
-        rng.shuffle(indices)
+        rng.shuffle(train_indices)
+        rng.shuffle(test_indices)
 
-    test_idx = indices[:n_test]
-    train_idx = indices[n_test:]
+    if test_indices.size == 0:
+        raise ValueError("test split is empty; use a larger dataset or smaller number of classes")
 
-    return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
+    return X[train_indices], X[test_indices], y[train_indices], y[test_indices]
 
 
 def _validate_numeric_array(X, name="Input"):
